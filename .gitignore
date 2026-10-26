@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+.streamlit/secrets.toml
+*.log
+artifacts/
+资产定价课程评估说明.docx
