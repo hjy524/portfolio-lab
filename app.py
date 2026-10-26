@@ -5,7 +5,7 @@ import hashlib
 import csv
 import io
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -533,7 +533,7 @@ def page_results():
                            "efficient_frontier.csv", "text/csv")
         st.download_button("下载可行组合样本 CSV", portfolio_rows(result["samples"], full.names).to_csv(index=False).encode("utf-8-sig"),
                            "feasible_samples.csv", "text/csv")
-        configuration = {"version": 1, "created_at": datetime.now().isoformat(timespec="seconds"), "source": source,
+        configuration = {"version": 1, "created_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"), "source": source,
             "names": market.names, "groups": groups, "annual_returns": market.mu.tolist(),
             "annual_covariance": market.cov.tolist(), "risk_free_rate": market.rf, "settings": s,
             "result": {"names": full.names, "weights": chosen.weights.tolist(), "expected_return": chosen.expected_return,
