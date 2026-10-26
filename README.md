@@ -1,5 +1,7 @@
 # 配比 Portfolio Lab
 
+[打开在线演示](https://portfolio-lab-midpxwpwqgw53xirwcmhta.streamlit.app/) · [GitHub 源码](https://github.com/hjy524/portfolio-lab)
+
 用于资产定价课程的 Python 资产配置 Demo。投资者通过中文向导选择资产、修改收益与风险假设、设置投资目标和限制，再查看配置权重、投资机会集、最小方差边界、有效前沿与最大夏普风险组合。
 
 内置资产及其收益、风险、相关性和历史序列全部为**模拟数据**，无需行情接口、账户或 API 密钥。也可以导入自己的历史简单收益率 CSV，或在表格中添加资产、直接修改参数。
