@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 
-from portfolio.core import AllocationError, Market, Optimizer, Restrictions
+from portfolio.core import AllocationError, Market, Optimizer, Restrictions, cal_interval
 from portfolio.data import demo_market, estimate_from_returns
 
 
@@ -127,6 +127,14 @@ class OptimizationTests(unittest.TestCase):
         samples = opt.sample(80)
         self.assertGreater(len(samples), 10)
         self.assertTrue(all(opt.is_feasible(p.weights) for p in samples))
+
+    def test_cal_fixed_category_is_one_exact_point(self):
+        rules = Restrictions(np.zeros(3), np.ones(3), 1., (("equity", (0,), .4, .4),))
+        self.assertEqual(cal_interval([.4, .6], rules), (1., 1.))
+
+    def test_cal_borrowing_interval(self):
+        rules = Restrictions(np.array([0., 0., -1.]), np.array([2., 2., 1.]), 3.)
+        self.assertEqual(cal_interval([.4, .6], rules), (0., 2.))
 
 
 class ReturnImportTests(unittest.TestCase):

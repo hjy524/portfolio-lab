@@ -12,7 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from portfolio.core import AllocationError, Market, Optimizer, Restrictions
+from portfolio.core import AllocationError, Market, Optimizer, Restrictions, cal_interval
 from portfolio.data import demo_market, estimate_from_returns
 
 st.set_page_config(page_title="配比 Portfolio Lab · 资产配置工具箱", page_icon="◒", layout="wide")
@@ -366,15 +366,19 @@ def frontier_chart(result, market, opt, include_rf):
     add_curve(fig, result["efficient"], "有效前沿", "#147D72", width=4)
     tangent = result["tangent"]
     if include_rf and tangent is not None:
-        scale = np.linspace(0, 1.5, 200)
+        extent = max(1.5, (opt.rules.gross_limit+1)/(np.abs(tangent.weights).sum()+1))
+        scale = np.linspace(0, extent, 200)
         fig.add_trace(go.Scatter(x=scale*tangent.volatility*100,
             y=(market.rf+scale*(tangent.expected_return-market.rf))*100,
             mode="lines", name="资本配置线 CAL（理论参考）", line={"color": "#D8A44D", "dash": "dot"},
             hovertemplate="波动 %{x:.2f}%<br>收益 %{y:.2f}%<extra>需另检查投资限制</extra>"))
-        valid = [opt.is_feasible(np.r_[s*tangent.weights, 1-s]) for s in scale]
-        fig.add_trace(go.Scatter(x=np.where(valid, scale*tangent.volatility*100, np.nan),
-            y=np.where(valid, (market.rf+scale*(tangent.expected_return-market.rf))*100, np.nan),
-            mode="lines", name="CAL 中满足当前限制的部分", line={"color": "#D8A44D", "width": 3}, connectgaps=False))
+        interval = cal_interval(tangent.weights, opt.rules)
+        if interval is not None:
+            feasible_scale = np.asarray(interval)
+            fig.add_trace(go.Scatter(x=feasible_scale*tangent.volatility*100,
+                y=(market.rf+feasible_scale*(tangent.expected_return-market.rf))*100,
+                mode="lines+markers" if abs(interval[1]-interval[0]) < 1e-8 else "lines",
+                name="CAL 中满足当前限制的部分", line={"color": "#D8A44D", "width": 3}))
         fig.add_trace(go.Scatter(x=[tangent.volatility*100], y=[tangent.expected_return*100],
             mode="markers", name="风险资产最大夏普组合", marker={"color": "#D8A44D", "size": 11, "symbol": "diamond"}))
     for key, label, color, symbol in [("gmv", "全局最小方差组合", "#477EA8", "circle"),

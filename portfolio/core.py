@@ -63,6 +63,37 @@ class Restrictions:
     groups: tuple = ()
 
 
+def cal_interval(risky_weights, rules: Restrictions):
+    """Exact nonnegative risky-allocation interval for cash + a fixed portfolio.
+
+    Final weights are (y*w, 1-y). Return None if no such mix meets all
+    restrictions; a singleton interval represents one feasible point.
+    """
+    risky_weights = np.asarray(risky_weights, float)
+    direction = np.r_[risky_weights, -1.]
+    base = np.r_[np.zeros(len(risky_weights)), 1.]
+    gross = np.abs(risky_weights).sum()
+    upper = ((rules.gross_limit+1)/(gross+1) if gross <= rules.gross_limit+1e-12
+             else (rules.gross_limit-1)/(gross-1))
+    lower = 0.
+    intervals = [(base[i], direction[i], lo, hi)
+                 for i, (lo, hi) in enumerate(zip(rules.lower, rules.upper))]
+    intervals += [(base[list(idx)].sum(), direction[list(idx)].sum(), lo, hi)
+                  for _, idx, lo, hi in rules.groups]
+    for offset, slope, lo, hi in intervals:
+        if abs(slope) < 1e-12:
+            if offset < lo-1e-10 or offset > hi+1e-10:
+                return None
+            continue
+        a, b = (lo-offset)/slope, (hi-offset)/slope
+        lower, upper = max(lower, min(a, b)), min(upper, max(a, b))
+        if lower > upper+1e-10:
+            return None
+    if lower > upper:
+        lower = upper = (lower+upper)/2
+    return float(lower), float(upper)
+
+
 class Optimizer:
     """Use LP for exact linear feasibility and SLSQP for convex quadratic problems.
 
