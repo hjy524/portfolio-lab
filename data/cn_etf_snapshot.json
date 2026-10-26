@@ -1,0 +1,59 @@
+{
+  "provider": "Yahoo Finance 公开历史行情",
+  "endpoint": "https://query1.finance.yahoo.com/v8/finance/chart/",
+  "price_basis": "Yahoo Finance adjusted close（复权收盘价）",
+  "retrieved_at": "2026-10-26T14:26:58+08:00",
+  "delivery": "在线获取",
+  "dropped_unaligned_dates": 1,
+  "currency": "CNY",
+  "start_date": "2023-10-25",
+  "end_date": "2026-10-23",
+  "observations": 724,
+  "periods_per_year": 252,
+  "estimator": "日简单收益算术均值×252；样本协方差×252",
+  "assets": [
+    {
+      "code": "510300",
+      "name": "沪深300ETF华泰柏瑞",
+      "group": "权益",
+      "exposure": "A股大盘股票",
+      "exchange": "上交所"
+    },
+    {
+      "code": "510500",
+      "name": "中证500ETF南方",
+      "group": "权益",
+      "exposure": "A股中盘股票",
+      "exchange": "上交所"
+    },
+    {
+      "code": "513500",
+      "name": "标普500ETF博时",
+      "group": "权益",
+      "exposure": "美国股票，含汇率及溢价风险",
+      "exchange": "上交所"
+    },
+    {
+      "code": "511010",
+      "name": "国债ETF国泰",
+      "group": "债券",
+      "exposure": "国债，价格会随利率变化",
+      "exchange": "上交所"
+    },
+    {
+      "code": "511260",
+      "name": "十年国债ETF国泰",
+      "group": "债券",
+      "exposure": "长期国债，对利率更敏感",
+      "exchange": "上交所"
+    },
+    {
+      "code": "518880",
+      "name": "黄金ETF华安",
+      "group": "另类",
+      "exposure": "黄金，价格也可能明显下跌",
+      "exchange": "上交所"
+    }
+  ],
+  "csv_sha256": "98b4fbdca10302506ddafe9fe90cda1867bcd31b24a4900f4f6837383e4f440f"
+}

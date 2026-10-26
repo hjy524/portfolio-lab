@@ -14,11 +14,16 @@ import streamlit as st
 
 from portfolio.core import AllocationError, Market, Optimizer, Restrictions, cal_interval
 from portfolio.data import demo_market, estimate_from_returns
+from portfolio.market_data import load_market_snapshot, fetch_live_market, ETF_UNIVERSE, shanghai_today
+from portfolio.guidance import PROFILES, HORIZONS, GROUP_GUIDANCE, beginner_settings
+from portfolio.summary import comparison_table, weights_comparison, weight_details, largest_holding, one_line
 
 st.set_page_config(page_title="配比 Portfolio Lab · 资产配置工具箱", page_icon="◒", layout="wide")
 
 COLORS = ["#147D72", "#477EA8", "#D8A44D", "#8696C5", "#AF7569", "#5CA6A6", "#9BAA65", "#6B879B"]
 STEPS = ["01  选择资产", "02  设置目标与限制", "03  查看配置方案", "04  方法与作业对照"]
+REAL_SOURCE = "真实市场 ETF"
+SOURCES = [REAL_SOURCE, "内置模拟资产", "导入历史收益 CSV"]
 
 
 def style():
@@ -46,6 +51,37 @@ def navigate(step):
     st.session_state["navigation"] = STEPS[step]
 
 
+def choose_mode(mode):
+    st.session_state["user_mode"] = mode
+    st.session_state["navigation"] = STEPS[0]
+    st.session_state["last_page"] = None
+    st.session_state.setdefault("data_source", REAL_SOURCE)
+
+
+def change_mode():
+    choose_mode(st.session_state["mode_picker"])
+
+
+def welcome():
+    st.markdown('<div class="eyebrow">PORTFOLIO LAB · 资产配置工具箱</div>', unsafe_allow_html=True)
+    st.title("先选一种适合你的使用方式。")
+    st.markdown('<p class="intro">把一笔资金分到不同资产中，看看收益和起伏会怎样变化。无需先懂金融术语，也可以进入完整的课程分析。</p>', unsafe_allow_html=True)
+    a, b = st.columns(2)
+    with a, st.container(border=True):
+        st.subheader("普通用户")
+        st.write("**有人带着选，先看懂结果。**")
+        st.write("回答资金用途、希望少些起伏还是多些收益空间等问题。工具会说明每个选择的含义，并自动翻译成可检查的配置限制。")
+        st.caption("适合首次使用：不用填写相关系数、风险厌恶系数或理解做空。")
+        st.button("普通用户 · 带我开始", key="start_beginner", type="primary", on_click=choose_mode, args=("普通用户",))
+    with b, st.container(border=True):
+        st.subheader("专业用户")
+        st.write("**自己设参数，查看完整分析。**")
+        st.write("选择真实 ETF、模拟资产或导入历史收益。自行修改收益、相关性、单项与类别限制、现金、做空和总敞口。")
+        st.caption("适合课程展示与研究：完整输出可行集、两类前沿及切线组合。")
+        st.button("专业用户 · 自己设置", key="start_pro", on_click=choose_mode, args=("专业用户",))
+    st.info("两种模式使用同一套计算方法。普通模式只简化提问和说明，仍可查看各方案的资产代码、权重与风险收益对比；稍后可随时切换。")
+
+
 def signature(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
@@ -62,16 +98,76 @@ def chart_layout(fig, height=440):
 
 def get_market_inputs():
     assets, correlation, history = demo_market()
-    source = st.session_state.get("source_choice", st.session_state.get("data_source", "内置模拟资产"))
+    source = st.session_state.get("data_source", st.session_state.get("source_choice", "内置模拟资产"))
     if source == "导入历史收益 CSV":
         if "imported_market" not in st.session_state:
             raise AllocationError("请先在第一步上传有效的历史收益 CSV，或切回内置模拟资产。")
         assets, correlation, history = st.session_state["imported_market"]
-    base = pd.DataFrame({"启用": True, "资产名称": assets["name"], "类别": assets["group"],
+    if source == REAL_SOURCE:
+        try:
+            assets, correlation, history, provenance = st.session_state.get("real_market") or load_market_snapshot()
+            st.session_state["real_provenance"] = provenance
+        except (ValueError, OSError) as exc:
+            raise AllocationError(f"真实行情暂不可用：{exc}。请重新获取行情，或明确选择模拟数据。") from None
+    base = pd.DataFrame({"启用": True, "资产代码": assets["code"].astype(str), "资产名称": assets["name"], "类别": assets["group"],
                          "预期年收益 (%)": assets["return"]*100,
                          "年化波动 (%)": assets["volatility"]*100})
     key = signature({"assets": assets.to_json(), "corr": correlation.tolist()})[:12]
     return base, correlation, history, key, source
+
+
+def selected_metadata():
+    base, _, _, key, source = get_market_inputs()
+    edited = st.session_state.get("asset_values_"+key, base).dropna(how="all")
+    metadata = {}
+    for _, row in edited.iterrows():
+        if not bool(row.get("启用", False)):
+            continue
+        code = row.get("资产代码", "未填写")
+        code = "未填写" if pd.isna(code) or not str(code).strip() else str(code).strip()
+        if source == "内置模拟资产":
+            code += "（模拟）"
+        metadata[str(row["资产名称"]).strip()] = {"code": code, "group": str(row.get("类别", "自定义"))}
+    metadata["无风险资产"] = {"code": "—（模型基准）", "group": "现金"}
+    return metadata
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_live_market(years):
+    return fetch_live_market(years)[1]
+
+
+def real_data_controls():
+    st.write("**中国上市 ETF · 人民币计价**")
+    st.caption("从公开行情源获取复权历史收盘价，排除上海日期的当天盘中数据；预期收益使用历史均值估计。")
+    a, b = st.columns([1, 2])
+    years = a.selectbox("历史观察窗口", [3, 5, 1], format_func=lambda y: f"最近 {y} 年", key="real_years")
+    if b.button("获取／刷新真实行情", key="refresh_real"):
+        try:
+            cached_live_market.clear()
+            with st.spinner("正在获取并对齐六只 ETF 的完整交易日价格…"):
+                updated = cached_live_market(years)
+            st.session_state["real_market"] = updated
+            st.session_state.pop("real_fetch_error", None)
+        except Exception:
+            st.session_state["real_fetch_error"] = "本次在线获取失败，已保留上次可验证的真实行情；没有切换为模拟数据。可稍后重试或导入自己的 CSV。"
+    if st.session_state.get("real_fetch_error"):
+        st.warning(st.session_state["real_fetch_error"])
+    try:
+        get_market_inputs()
+        meta = st.session_state["real_provenance"]
+        st.info(f"{meta['delivery']} · {meta['start_date']} 至 {meta['end_date']} · {meta['observations']} 个对齐日收益 · CNY")
+        if (shanghai_today()-pd.Timestamp(meta["end_date"]).date()).days > 15:
+            st.warning("行情截止日距今已超过 15 天，尚不能代表当前市场；建议刷新或导入近期数据。")
+        if st.session_state.get("real_market") is None and years != 3:
+            st.caption("内置快照为三年窗口。点击获取／刷新成功后才会应用你选择的其他窗口。")
+        with st.expander("数据来源、更新时间与口径"):
+            st.write(f"来源：{meta['provider']}；获取时间：{meta['retrieved_at']}。")
+            st.write(f"价格口径：{meta['price_basis']}。以六只 ETF 共同有价格的日期对齐后计算简单收益，不前向填充；不逐笔模拟实际分红再投资及交易费用。")
+            st.write("标普500ETF 虽以人民币交易，仍有海外股票、汇率和折溢价风险。债券 ETF 有价格波动，不能当成模型无风险资产。")
+            st.link_button("查看沪深300ETF行情来源", "https://quote.eastmoney.com/sh510300.html")
+    except AllocationError as exc:
+        st.error(str(exc))
 
 
 def selected_market():
@@ -114,8 +210,10 @@ def page_assets():
     st.markdown('<div class="eyebrow">STEP 01 · INVESTMENT UNIVERSE</div>', unsafe_allow_html=True)
     st.title("先选资产，再谈配置。")
     st.markdown('<p class="intro">告诉工具你愿意投资什么。保留示例即可开始，也可以加入自己的资产与判断。</p>', unsafe_allow_html=True)
-    sources = ["内置模拟资产", "导入历史收益 CSV"]
-    source = st.radio("数据来源", sources, index=sources.index(st.session_state.get("data_source", sources[0])), horizontal=True, key="source_choice")
+    sources = SOURCES
+    if st.session_state.get("page_changed") or "pro_source_index" not in st.session_state:
+        st.session_state["pro_source_index"] = sources.index(st.session_state.get("data_source", sources[0]))
+    source = st.radio("数据来源", sources, index=st.session_state["pro_source_index"], horizontal=True, key="source_choice")
     st.session_state["data_source"] = source
     if source == "导入历史收益 CSV":
         with st.container(border=True):
@@ -148,20 +246,26 @@ def page_assets():
             elif "imported_market" not in st.session_state:
                 st.info("上传文件后即可继续；也可以切回内置模拟资产。")
                 return
+    elif source == REAL_SOURCE:
+        real_data_controls()
     else:
         st.markdown('<div class="note">课堂演示数据 · 6 类资产，统一以人民币计价。收益、波动和相关性均为假设，历史序列为人工生成，不代表真实市场表现。</div>', unsafe_allow_html=True)
     base, corr, history, data_key, _ = get_market_inputs()
     left, right = st.columns([3.2, 1])
     with left:
         st.subheader("可投资资产")
-        st.caption("勾选启用资产；双击单元格即可修改。底部可新增资产，新增资产默认与其他资产零相关。")
+        st.caption("真实 ETF 的名称与代码固定，可选择资产或修改年化假设做情景分析。" if source == REAL_SOURCE else
+                   "勾选启用资产；双击单元格即可修改。底部可新增资产，新增资产默认与其他资产零相关。")
         editor_base_key = "asset_editor_base_"+data_key
         if st.session_state.get("page_changed") or editor_base_key not in st.session_state:
             st.session_state[editor_base_key] = st.session_state.get("asset_values_"+data_key, base).copy()
-        edited = st.data_editor(st.session_state[editor_base_key], key="assets_editor_"+data_key, num_rows="dynamic", hide_index=True,
+        edited = st.data_editor(st.session_state[editor_base_key], key="assets_editor_"+data_key,
+            num_rows="fixed" if source == REAL_SOURCE else "dynamic", hide_index=True,
+            disabled=["资产代码", "资产名称"] if source == REAL_SOURCE else [],
             use_container_width=True,
             column_config={
                 "启用": st.column_config.CheckboxColumn(default=True),
+                "资产代码": st.column_config.TextColumn(help="真实 ETF 用六位证券代码；模拟或自定义代码不代表真实可交易证券。"),
                 "资产名称": st.column_config.TextColumn(required=True),
                 "类别": st.column_config.TextColumn(required=True),
                 "预期年收益 (%)": st.column_config.NumberColumn(min_value=-100.0, max_value=200.0, step=.1, format="%.2f"),
@@ -172,7 +276,8 @@ def page_assets():
         st.subheader("如何填写")
         st.write("**预期收益**\n\n你对未来一年的收益判断。")
         st.write("**年化波动**\n\n收益的不确定程度，也是本工具的风险尺度。")
-        st.caption("新增一行时，请完整填写名称、类别、收益和波动，并勾选启用。")
+        st.caption("真实行情只对应当前候选池。若想添加其他资产，请使用 CSV 导入或模拟资产模式。" if source == REAL_SOURCE else
+                   "新增一行时，请完整填写名称、类别、收益和波动，并勾选启用。")
     with st.expander("专业设置 · 查看与编辑相关系数"):
         names = edited["资产名称"].fillna("").astype(str).tolist()
         if names and len(names) == len(set(names)) and all(names) and len(names) <= 12:
@@ -198,6 +303,108 @@ def page_assets():
         st.button("下一步：设置投资目标 →", type="primary", on_click=navigate, args=(1,))
     except AllocationError as exc:
         st.error(str(exc))
+
+
+def beginner_assets():
+    st.markdown('<div class="eyebrow">第 1 步 · 了解你愿意投资的资产</div>', unsafe_allow_html=True)
+    st.title("先认识资产，不急着选比例。")
+    st.write("ETF 可以理解为一篮子资产。选中某个类别，表示允许工具在其中配置，并不意味着一定会买入每只 ETF。")
+    sources = [REAL_SOURCE, "内置模拟资产"]
+    previous = st.session_state.get("data_source", REAL_SOURCE)
+    if st.session_state.get("page_changed") or "beginner_source_index" not in st.session_state:
+        st.session_state["beginner_source_index"] = sources.index(previous) if previous in sources else 0
+    source = st.radio("使用哪组数据", sources, index=st.session_state["beginner_source_index"],
+                      key="beginner_source", horizontal=True)
+    st.session_state["data_source"] = source
+    if source == REAL_SOURCE:
+        real_data_controls()
+    else:
+        st.info("当前是人工模拟数据，方便练习；这些资产代码不代表可交易证券。")
+    try:
+        base, _, _, key, _ = get_market_inputs()
+    except AllocationError as exc:
+        st.error(str(exc))
+        return
+    groups = sorted(set(base["类别"]))
+    columns = st.columns(len(groups))
+    for col, group in zip(columns, groups):
+        with col, st.container(border=True):
+            st.subheader(group)
+            st.write(GROUP_GUIDANCE.get(group, "你自定义的资产类别；请先了解其收益来源和可能的价格波动。"))
+    selected_groups = st.multiselect("哪些类别可以纳入方案？", groups,
+        default=[g for g in st.session_state.get("beginner_allowed_groups", groups) if g in groups],
+        key="beginner_groups")
+    st.session_state["beginner_allowed_groups"] = selected_groups
+    base["启用"] = base["类别"].isin(selected_groups)
+    st.session_state["asset_values_"+key] = base
+    shown = base[base["启用"]][["资产名称", "资产代码", "类别"]]
+    st.subheader("这次允许配置的候选资产")
+    st.dataframe(shown, hide_index=True, use_container_width=True)
+    st.caption("现金在下一步单独设置。国债 ETF 是会涨跌的基金，与模型中零波动的现金基准不同。")
+    try:
+        selected_market()
+        st.button("下一步：告诉我资金怎么用 →", type="primary", on_click=navigate, args=(1,))
+    except AllocationError as exc:
+        st.warning(str(exc)+" 可以再选一个资产类别。")
+
+
+def beginner_preferences():
+    st.markdown('<div class="eyebrow">第 2 步 · 用日常语言表达你的要求</div>', unsafe_allow_html=True)
+    st.title("这笔钱，你希望怎么安排？")
+    try:
+        market, groups, *_ = selected_market()
+    except AllocationError as exc:
+        st.error(str(exc))
+        st.button("先选择资产", on_click=navigate, args=(0,))
+        return
+    if st.session_state.get("page_changed") or "beginner_defaults" not in st.session_state:
+        st.session_state["beginner_defaults"] = dict(st.session_state.get("beginner_answers", {}))
+    saved = st.session_state["beginner_defaults"]
+    a, b = st.columns([1.2, 1])
+    with a, st.container(border=True):
+        budget = st.number_input("准备配置多少钱（元）？", min_value=1000., max_value=1e12,
+            value=saved.get("budget", 100000.), step=10000., key="beginner_budget")
+        horizon_options = list(HORIZONS)
+        horizon = st.selectbox("大约什么时候可能需要用到这笔钱？", horizon_options,
+            index=horizon_options.index(saved.get("horizon", horizon_options[1])), key="beginner_horizon")
+        st.caption(f"这会调整现金保留底线：当前至少 {HORIZONS[horizon]['cash_min']:.0f}%。越快可能用钱，越减少依赖价格上涨；工具暂不模拟未来提款。")
+        profile_options = list(PROFILES)
+        profile = st.radio("比较下面的体验，你更接近哪一种？", profile_options,
+            index=profile_options.index(saved.get("profile", profile_options[1])), key="beginner_profile")
+        st.info(PROFILES[profile]["explanation"])
+    with b, st.container(border=True):
+        st.subheader("再留一点自己决定的空间")
+        reserve = st.slider("至少保留多少比例的现金？", 0., 100., saved.get("reserve", 20.), 5., key="beginner_reserve")
+        st.caption("现金比例越高，能投入 ETF 的资金越少；实际最低现金取你选择的比例与用钱时间要求中的较高者。")
+        rf = st.number_input("现金基准年收益假设 (%)", min_value=-5., max_value=30., value=saved.get("rf", 2.), step=.1,
+            key="beginner_rf", help="这是用于比较的模型假设，不是实时银行利率，也不是某只货币基金的收益承诺。")
+        st.write("**什么是“波动”？**")
+        st.write("它描述收益的上下起伏程度。例如年化波动 10%，不能理解为最多亏损 10%。这个工具不保证本金或收益。")
+        st.write("**为什么分散？**")
+        st.write("不同资产不总是一起涨跌；组合可能比单押一种资产更平缓，但分散也不能消除所有风险。")
+    st.session_state["beginner_answers"] = {"budget": budget, "horizon": horizon, "profile": profile, "reserve": reserve, "rf": rf}
+    s = beginner_settings(market.names, groups, profile, horizon, reserve, budget, rf)
+    st.session_state["settings"] = s
+    # Avoid a hidden professional widget overriding the beginner's rf assumption.
+    st.session_state["rf_rate"] = rf
+    st.subheader("你的选择，会转成这些清楚的规则")
+    rows = [{"你的要求": "现金保留", "工具采用的规则": f"至少 {s['rf_lower']:.0f}%"},
+            {"你的要求": "控制上下起伏", "工具采用的规则": f"年化波动不超过 {s['cap']:.0f}% 的组合中，选择预期收益最高者"},
+            {"你的要求": "分散单项投资", "工具采用的规则": "每只 ETF 最多 40%；不做空、不借钱投资"}]
+    rows += [{"你的要求": group+"配置空间", "工具采用的规则": f"最多 {bounds[1]:.0f}%"} for group, bounds in s["groups"].items()]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.caption("这些是透明的演示规则，不是对你个人风险承受能力的正式测评；专业模式可逐项修改。")
+    try:
+        market, groups, *_ = selected_market()
+        full, rules, _, _ = settings(market, groups)
+        opt = Optimizer(full, rules)
+        minimum = opt.minimum_variance()
+        if minimum.volatility > s["cap"]/100+2e-6:
+            st.warning(f"当前要求下最低波动为 {minimum.volatility:.2%}，高于选择的上限；可以多保留现金、换一组资产或选择其他偏好。")
+        else:
+            st.button("看我的配置与其他方案 →", type="primary", on_click=navigate, args=(2,))
+    except AllocationError as exc:
+        st.warning(str(exc)+" 可以增加允许投资的类别或现金比例。")
 
 
 def settings(market, groups):
@@ -238,7 +445,9 @@ def page_settings():
         st.button("返回选择资产", on_click=navigate, args=(0,))
         return
     left, right = st.columns([1.15, 1])
-    saved = st.session_state.get("settings", {})
+    if st.session_state.get("page_changed") or "professional_defaults" not in st.session_state:
+        st.session_state["professional_defaults"] = dict(st.session_state.get("settings", {}))
+    saved = st.session_state["professional_defaults"]
     with left, st.container(border=True):
         st.subheader("你希望优先实现什么？")
         objectives = ["平衡收益与风险", "尽可能降低波动", "达到目标收益", "控制风险上限", "获得最高夏普比率"]
@@ -300,6 +509,7 @@ def page_settings():
         group_bounds = {r["类别"]: (r["最低比例 (%)"], r["最高比例 (%)"]) for _, r in group_values.iterrows()}
         st.caption("类别限制使用类别内资产的净权重之和；无风险资产单独受现金上下限约束。")
     st.session_state["settings"] = {
+        "mode": "专业用户",
         "objective": objective, "aversion": aversion, "target": target, "cap": cap, "budget": budget,
         "include_rf": include_rf, "allow_short": allow_short, "rf_lower": rf_lower, "rf_upper": rf_upper, "rf_rate": rf_rate,
         "gross_limit": gross_limit, "use_groups": use_groups, "groups": group_bounds,
@@ -334,9 +544,10 @@ def compute(names, mu, covariance, rf, rules, risky_rules, include_rf, objective
     else:
         chosen = opt.utility(aversion)
     samples = opt.sample()
-    tangent, tangent_error, risky_frontier, risky_efficient = None, None, [], []
+    tangent, tangent_error, risky_frontier, risky_efficient, risky_gmv = None, None, [], [], None
     try:
         risky_opt = Optimizer(risky, risky_rules)
+        risky_gmv = risky_opt.minimum_variance()
         if include_rf:
             risky_frontier, risky_efficient = risky_opt.frontier()
         tangent = risky_opt.maximum_sharpe()
@@ -344,6 +555,7 @@ def compute(names, mu, covariance, rf, rules, risky_rules, include_rf, objective
         tangent_error = str(exc)
     return {"frontier": frontier, "efficient": efficient, "gmv": gmv, "chosen": chosen,
             "samples": samples, "tangent": tangent, "tangent_error": tangent_error,
+            "risky_gmv": risky_gmv,
             "risky_frontier": risky_frontier, "risky_efficient": risky_efficient}
 
 
@@ -393,9 +605,66 @@ def frontier_chart(result, market, opt, include_rf):
 
 
 def weight_table(market, portfolio, budget):
-    return pd.DataFrame({"资产": market.names, "配置比例 (%)": portfolio.weights*100,
-                         "配置金额（元）": portfolio.weights*budget,
-                         "预期收益贡献 (%)": portfolio.weights*market.mu*100})
+    table = weight_details(market.names, portfolio, selected_metadata(), budget)
+    table["预期收益贡献 (%)"] = portfolio.weights*market.mu*100
+    return table
+
+
+def summary_plans(result, market, full):
+    plans = [("我的方案", full.names, result["chosen"]),
+             ("最小方差方案", full.names, result["gmv"]),
+             ("切线／最大夏普风险组合", market.names, result["tangent"])]
+    if len(full.names) > len(market.names):
+        plans.append(("仅风险资产最小方差", market.names, result["risky_gmv"]))
+    return plans
+
+
+def show_overview(result, market, full, rules, budget, beginner):
+    metadata = selected_metadata()
+    plans = summary_plans(result, market, full)
+    st.subheader("把三种核心方案放在一起看")
+    st.caption("我的方案按你的目标计算；最小方差方案追求最低起伏；切线组合在风险资产中追求最高夏普比率。后两者是比较基准，不会覆盖你的选择。")
+    for col, (label, names, p) in zip(st.columns(3), plans[:3]):
+        with col, st.container(border=True):
+            st.subheader(label)
+            if p is None:
+                st.write("**当前限制下无法给出**")
+                st.caption(result["tangent_error"] or "请检查风险资产限制。")
+                continue
+            st.write(f"预期年收益　**{p.expected_return:.2%}**")
+            st.write(f"年化波动　　**{p.volatility:.2%}**")
+            top = largest_holding(names, p, metadata)
+            st.write(f"最大仓位：**{top['name']}**")
+            st.caption(f"代码 {top['code']} · 权重 {top['weight']:.1%}")
+            if label == "切线／最大夏普风险组合":
+                st.caption("仅风险资产内部满仓；混入现金后仍需检查现金和其他持仓限制。")
+    st.subheader("每个方案，一句话读懂")
+    for label, names, p in plans:
+        if p is not None:
+            st.write(f"**{label}：** {one_line(names, p, metadata, label)}")
+    st.caption("真实行情的预期收益来自所选历史窗口的算术均值估计；手工修改后使用你的假设。以上不是对未来实际收益或最大亏损的保证。")
+    st.subheader("风险收益与最大仓位汇总")
+    comparison = comparison_table(plans, metadata)
+    st.dataframe(comparison.style.format({"预期年收益 (%)": "{:.2f}", "年化波动 (%)": "{:.2f}",
+        "夏普比率": "{:.3f}", "最大仓位 (%)": "{:.2f}"}, na_rep="不适用"), hide_index=True, use_container_width=True)
+    st.subheader("各类资产，分别配了多少")
+    categories = weights_comparison(plans, metadata, categories=True)
+    fig = go.Figure()
+    for i, (_, row) in enumerate(categories.iterrows()):
+        fig.add_trace(go.Bar(name=row["类别"], y=[p[0] for p in plans if p[2] is not None],
+            x=[row.get(p[0]+" (%)", 0) for p in plans if p[2] is not None], orientation="h",
+            marker_color=COLORS[i % len(COLORS)], hovertemplate="%{y}<br>%{x:.2f}%<extra>%{fullData.name}</extra>"))
+    fig.update_layout(barmode="relative")
+    fig.update_xaxes(title="占组合资金的比例 (%)")
+    st.plotly_chart(chart_layout(fig, 310), use_container_width=True)
+    st.dataframe(categories.style.format({c: "{:.2f}" for c in categories.columns if c.endswith("(%)")}), hide_index=True, use_container_width=True)
+    st.subheader("每只资产的代码与权重对照")
+    weights = weights_comparison(plans, metadata)
+    st.dataframe(weights.style.format({c: "{:.2f}" for c in weights.columns if c.endswith("(%)")}), hide_index=True, use_container_width=True)
+    st.download_button("下载所有方案汇总 CSV", comparison.to_csv(index=False).encode("utf-8-sig"), "portfolio_comparison.csv", "text/csv")
+    st.download_button("下载各方案持仓对照 CSV", weights.to_csv(index=False).encode("utf-8-sig"), "portfolio_weights_comparison.csv", "text/csv")
+    if beginner:
+        st.info("你可以先看“我的方案”对应的现金、债券和股票比例，再对比最低波动方案；若觉得起伏仍太大，回到第二步增加现金或选择更在意少波动。")
 
 
 def portfolio_rows(portfolios, names):
@@ -409,6 +678,11 @@ def portfolio_rows(portfolios, names):
 def page_results():
     st.markdown('<div class="eyebrow">STEP 03 · YOUR ALLOCATION</div>', unsafe_allow_html=True)
     st.title("看见风险与收益的取舍。")
+    beginner = st.session_state.get("user_mode") == "普通用户"
+    if beginner and st.session_state.get("settings", {}).get("mode") != "普通用户":
+        st.info("先回答资金用途与偏好，才能按普通模式的规则生成方案。")
+        st.button("去设置我的要求", on_click=navigate, args=(1,))
+        return
     try:
         market, groups, source, history, _ = selected_market()
         full, rules, risky_rules, s = settings(market, groups)
@@ -426,14 +700,41 @@ def page_results():
     budget = s.get("budget", 100000.)
     include_rf = s.get("include_rf", True)
     objective = s.get("objective", "平衡收益与风险")
-    st.markdown(f"**配置目标：{objective}**　·　{len(market.names)} 项风险资产　·　{'含无风险资产' if include_rf else '仅风险资产'}")
+    if beginner:
+        st.markdown(f"**你的偏好：{s.get('beginner_profile', '按所选要求')}**　·　至少保留 {s.get('rf_lower', 0):.0f}% 现金")
+    else:
+        st.markdown(f"**配置目标：{objective}**　·　{len(market.names)} 项风险资产　·　{'含无风险资产' if include_rf else '仅风险资产'}")
     a, b, c, d = st.columns(4)
-    a.metric("预期年化收益", f"{chosen.expected_return:.2%}")
-    b.metric("年化波动率", f"{chosen.volatility:.2%}")
-    c.metric("夏普比率", "不适用" if chosen.sharpe is None else f"{chosen.sharpe:.2f}")
-    d.metric("总敞口", f"{np.abs(chosen.weights).sum():.1%}")
-    tabs = st.tabs(["我的方案", "投资机会集", "专业分析", "导出与复现"])
+    a.metric(("历史均值估计年收益" if source == REAL_SOURCE else "模型假设年收益") if beginner else "预期年化收益", f"{chosen.expected_return:.2%}")
+    b.metric("上下起伏参考（年化波动）" if beginner else "年化波动率", f"{chosen.volatility:.2%}")
+    if beginner:
+        c.metric("保留现金", f"{chosen.weights[-1]:.1%}")
+        d.metric("最大单项比例", f"{np.abs(chosen.weights).max():.1%}")
+    else:
+        c.metric("夏普比率", "不适用" if chosen.sharpe is None else f"{chosen.sharpe:.2f}")
+        d.metric("总敞口", f"{np.abs(chosen.weights).sum():.1%}")
+    if source == REAL_SOURCE:
+        meta = st.session_state.get("real_provenance", {})
+        st.caption(f"真实 ETF · CNY · 行情截止 {meta.get('end_date', '未记录')} · {meta.get('provider', '')} · 收益为历史均值估计")
+        base, _, _, key, _ = get_market_inputs()
+        current = st.session_state.get("asset_values_"+key, base)
+        active = current[current["启用"].fillna(False).astype(bool)]
+        positions = [base.index.get_loc(i) for i in active.index if i in base.index]
+        changed = len(positions) != len(active)
+        if not changed:
+            _, original_corr, *_ = get_market_inputs()
+            original_vol = base.iloc[positions]["年化波动 (%)"].to_numpy(float)/100
+            original_cov = original_corr[np.ix_(positions, positions)]*np.outer(original_vol, original_vol)
+            changed = (not np.allclose(market.mu, base.iloc[positions]["预期年收益 (%)"].to_numpy(float)/100)
+                       or not np.allclose(market.cov, original_cov))
+        if changed:
+            st.caption("你已修改市场估计参数；当前输出基于修改后的假设，详情见导出 JSON。")
+    tab_names = (["方案总览", "我的资金清单", "看懂风险收益图", "进一步了解参数", "带走方案"] if beginner
+                 else ["方案总览", "我的方案", "投资机会集", "专业分析", "导出与复现"])
+    tabs = st.tabs(tab_names)
     with tabs[0]:
+        show_overview(result, market, full, rules, budget, beginner)
+    with tabs[1]:
         left, right = st.columns([1, 1.4])
         with left:
             st.subheader("资金如何分配")
@@ -473,8 +774,10 @@ def page_results():
                            "要求": f"{lo:.0%} 至 {hi:.0%}", "状态": "通过"})
         st.dataframe(pd.DataFrame(checks), hide_index=True, use_container_width=True)
         st.caption("所有通过状态均基于计算后的实际权重检查；求解容差为 0.0002 个百分点。")
-    with tabs[1]:
+    with tabs[2]:
         st.subheader("每一个点，都是一种配置可能")
+        if beginner:
+            st.info("横轴越靠右，表示起伏越大；纵轴越高，表示模型估计的收益越高。星号是你的方案，绿线表示给定风险下较有吸引力的选择；不需要先理解公式。")
         st.plotly_chart(frontier_chart(result, market, opt, include_rf), use_container_width=True)
         st.caption("灰色散点仅为可行组合的随机样本，不等于完整可行集；边界通过逐目标收益优化计算。有效前沿是全局最小方差点上方的部分。")
         if include_rf:
@@ -488,7 +791,7 @@ def page_results():
         st.write(f"预期年收益 **{sample.expected_return:.2%}**　·　年化波动 **{sample.volatility:.2%}**")
         st.dataframe(weight_table(full, sample, budget).style.format({"配置比例 (%)": "{:.2f}",
             "配置金额（元）": "{:,.2f}", "预期收益贡献 (%)": "{:.2f}"}), hide_index=True, use_container_width=True)
-    with tabs[2]:
+    with tabs[3]:
         st.subheader("关键组合对比")
         comps = {"推荐方案": chosen, "全局最小方差": result["gmv"]}
         compare = [{"组合": label, "预期年收益 (%)": p.expected_return*100, "年化波动 (%)": p.volatility*100,
@@ -526,7 +829,7 @@ def page_results():
             st.caption("贡献之和等于组合波动。负贡献表示该资产对组合产生对冲作用。")
         else:
             st.info("当前组合波动为零，风险贡献比例与夏普比率不适用。")
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("带走方案，也保留计算依据")
         st.caption("CSV 和 JSON 中的收益、波动与权重使用小数。例如 0.05 表示 5%。配置清单另以百分数显示。")
         st.download_button("下载配置清单 CSV", weight_table(full, chosen, budget).to_csv(index=False).encode("utf-8-sig"),
@@ -538,19 +841,22 @@ def page_results():
         st.download_button("下载可行组合样本 CSV", portfolio_rows(result["samples"], full.names).to_csv(index=False).encode("utf-8-sig"),
                            "feasible_samples.csv", "text/csv")
         configuration = {"version": 1, "created_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"), "source": source,
+            "asset_metadata": selected_metadata(), "market_provenance": st.session_state.get("real_provenance", {}) if source == REAL_SOURCE else {},
             "names": market.names, "groups": groups, "annual_returns": market.mu.tolist(),
             "annual_covariance": market.cov.tolist(), "risk_free_rate": market.rf, "settings": s,
             "result": {"names": full.names, "weights": chosen.weights.tolist(), "expected_return": chosen.expected_return,
                        "volatility": chosen.volatility, "sharpe": chosen.sharpe}}
+        configuration["comparison"] = comparison_table(summary_plans(result, market, full), selected_metadata()).replace({np.nan: None}).to_dict(orient="records")
+        configuration["comparison_weights"] = weights_comparison(summary_plans(result, market, full), selected_metadata()).to_dict(orient="records")
         json_text = json.dumps(configuration, ensure_ascii=False, indent=2, allow_nan=False)
         st.download_button("下载完整参数与结果 JSON", json_text.encode("utf-8"), "allocation_snapshot.json", "application/json")
-        report = make_report(configuration, rules)
+        report = make_report(configuration, rules, result, market, full)
         st.download_button("下载课堂演示报告 Markdown", report.encode("utf-8"), "allocation_report.md", "text/markdown")
         st.caption("可用项目内的 reproduce.py 读取 JSON 并重新计算。历史上传数据只在当前服务进程中处理，本应用不主动写入文件或数据库。")
     st.markdown('<div class="foot">均值–方差模型基于你输入的预期参数；计算结果用于课程演示，不构成未来收益保证。这里的风险指标准差，不代表最大回撤或最大亏损。</div>', unsafe_allow_html=True)
 
 
-def make_report(config, rules):
+def make_report(config, rules, computed=None, market=None, full=None):
     result = config["result"]
     rows = ["# 资产配置演示报告", "", f"生成时间：{config['created_at']}", f"数据来源：{config['source']}",
             f"配置目标：{config['settings'].get('objective', '平衡收益与风险')}", "",
@@ -562,8 +868,23 @@ def make_report(config, rules):
     rows += ["", f"总敞口上限：{rules.gross_limit:.0%}", ""]
     for group, _, lo, hi in rules.groups:
         rows.append(f"类别限制：{group} {lo:.0%} 至 {hi:.0%}")
+    if computed is not None:
+        metadata = config.get("asset_metadata", {})
+        rows += ["", "## 全部方案对照", ""]
+        for label, names, p in summary_plans(computed, market, full):
+            rows += ["", "### "+label, ""]
+            if p is None:
+                rows.append(computed["tangent_error"] or "当前限制下不可用。")
+                continue
+            rows += [one_line(names, p, metadata, label), "", "| 资产 | 代码 | 类别 | 权重 |", "| --- | --- | --- | ---: |"]
+            rows += [f"| {name} | {metadata.get(name, {}).get('code', '未填写')} | {metadata.get(name, {}).get('group', '自定义')} | {weight:.2%} |"
+                     for name, weight in zip(names, p.weights)]
+    provenance = config.get("market_provenance", {})
+    if provenance:
+        rows += ["", f"真实行情来源：{provenance['provider']}，{provenance['start_date']} 至 {provenance['end_date']}。",
+                 f"获取时间：{provenance['retrieved_at']}；价格口径：{provenance['price_basis']}。"]
     rows += ["", "使用算术均值、样本协方差或用户指定的年化参数，按净权重合计 100% 优化。",
-             "示例资产与历史序列为人工模拟数据；导入数据的估计参数以用户文件为准。",
+             "模拟数据、真实市场历史估计与用户导入数据分别标识，历史均值不能保证未来收益。",
              "完整输入和结果见同次导出的 JSON，可用 reproduce.py 复现。",
              "风险衡量为年化标准差，收益目标为预期值，不保证实际收益。"]
     return "\n".join(rows)
@@ -603,22 +924,28 @@ def page_methods():
 
 
 style()
+if not st.session_state.get("user_mode"):
+    welcome()
+    st.stop()
+
 with st.sidebar:
     st.markdown("### ◒ 配比")
     st.caption("PORTFOLIO LAB / 资产配置工具箱")
+    st.radio("使用模式", ["普通用户", "专业用户"], index=0 if st.session_state["user_mode"] == "普通用户" else 1,
+             key="mode_picker", on_change=change_mode, horizontal=True)
     st.divider()
     page = st.radio("你的配置流程", STEPS, key="navigation", label_visibility="collapsed")
     st.divider()
     st.markdown("**把投资想法，变成可检验的配置。**")
-    st.caption("Python · 均值–方差优化\n\n课程 Demo · 无需注册")
+    st.caption("真实历史与模拟数据均明确标识\n\n课程演示 · 无需注册" if st.session_state["user_mode"] == "普通用户" else "Python · 均值–方差优化\n\n课程 Demo · 无需注册")
     st.markdown('<div class="foot">先选择资产，再定义规则。<br>工具负责计算，你决定取舍。</div>', unsafe_allow_html=True)
 
 st.session_state["page_changed"] = page != st.session_state.get("last_page")
 st.session_state["last_page"] = page
 if page == STEPS[0]:
-    page_assets()
+    beginner_assets() if st.session_state["user_mode"] == "普通用户" else page_assets()
 elif page == STEPS[1]:
-    page_settings()
+    beginner_preferences() if st.session_state["user_mode"] == "普通用户" else page_settings()
 elif page == STEPS[2]:
     page_results()
 else:
